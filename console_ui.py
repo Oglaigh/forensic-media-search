@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import os
 from pathlib import Path
@@ -96,16 +97,139 @@ def prompt_queries(input_fn=input) -> list[str]:
             print(styled("  ! La consulta no puede estar vacía.", YELLOW))
 
 
-def show_summary(config: object, evidence: Path, queries: Sequence[str]) -> None:
-    section("03", "CONFIRMACIÓN", "Revise la configuración antes de iniciar el análisis.")
-    rows = (
+@dataclass(frozen=True, slots=True)
+class FinalEvaluationOptions:
+    top_k: int
+    rrf_constant: int
+    final_output: Path
+
+
+def _prompt_yes_default(input_fn: Callable[[str], str]) -> bool:
+    while True:
+        answer = input_fn(
+            styled("  ¿Desea generar un informe final consolidado? [S/n] › ", BOLD)
+        ).strip().casefold()
+        if answer in {"", "s", "si", "sí"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        print(styled("  ! Responda 's' para generar el informe o 'n' para omitirlo.", YELLOW))
+
+
+def _prompt_integer(
+    label: str,
+    default: int,
+    minimum: int,
+    input_fn: Callable[[str], str],
+) -> int:
+    while True:
+        raw = input_fn(styled(f"  {label} [{default}] › ", BOLD)).strip()
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            print(styled("  ! Ingrese un número entero.", YELLOW))
+            continue
+        if value < minimum:
+            condition = "mayor que cero" if minimum == 1 else "no negativo"
+            print(styled(f"  ! El valor debe ser {condition}.", YELLOW))
+            continue
+        return value
+
+
+def _strip_matching_quotes(raw: str) -> str:
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
+        return raw[1:-1]
+    return raw
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_final_output(raw: str, output_directory: Path, default_name: str) -> Path:
+    cleaned = _strip_matching_quotes(raw.strip()) or default_name
+    candidate = Path(cleaned).expanduser()
+    if not candidate.is_absolute():
+        candidate = output_directory / candidate
+    return candidate.resolve(strict=False)
+
+
+def prompt_final_evaluation(
+    config: object,
+    audit_output: Path,
+    default_final_name: str,
+    input_fn=input,
+) -> FinalEvaluationOptions | None:
+    section(
+        "03",
+        "EVALUACIÓN FINAL",
+        "Consolide por archivo sin alterar el informe completo de auditoría.",
+    )
+    if not _prompt_yes_default(input_fn):
+        print(styled("  · Se generará únicamente el informe de auditoría.", DIM))
+        return None
+
+    top_k = _prompt_integer(
+        "Top-K por query para evaluación", config.evaluator_top_k, 1, input_fn
+    )
+    rrf_constant = _prompt_integer(
+        "Constante RRF del Evaluator",
+        config.evaluator_rrf_constant,
+        0,
+        input_fn,
+    )
+    output_directory = Path(config.output_directory).resolve(strict=False)
+    while True:
+        raw = input_fn(styled(f"  Ruta del informe final [{default_final_name}] › ", BOLD))
+        final_output = _resolve_final_output(raw, output_directory, default_final_name)
+        if not _is_within(final_output, output_directory):
+            print(styled("  ! La ruta debe estar dentro de OUTPUT_DIRECTORY.", YELLOW))
+            continue
+        if final_output == audit_output.resolve(strict=False):
+            print(styled("  ! El informe final debe ser diferente al de auditoría.", YELLOW))
+            continue
+        if final_output == output_directory or final_output.suffix.lower() != ".csv":
+            print(styled("  ! La ruta final debe identificar un archivo CSV.", YELLOW))
+            continue
+        print(styled(f"  ✓ Informe final: {final_output}", GREEN))
+        return FinalEvaluationOptions(top_k, rrf_constant, final_output)
+
+
+def show_summary(
+    config: object,
+    evidence: Path,
+    queries: Sequence[str],
+    *,
+    audit_output: Path | None = None,
+    evaluation: FinalEvaluationOptions | None = None,
+) -> None:
+    section("04", "CONFIRMACIÓN", "Revise la configuración antes de iniciar el análisis.")
+    rows = [
         ("Evidencia", str(evidence)),
         ("Salida", str(config.output_directory)),
         ("Dispositivo", config.device.upper()),
         ("Batch size", str(config.batch_size)),
         ("Top-K", f"{config.top_k} por modelo y consulta"),
         ("Modelos", f"{config.siglip_model} + {config.clip_model}"),
-    )
+    ]
+    if audit_output is not None:
+        rows.append(("Auditoría", str(audit_output)))
+    if evaluation is None:
+        rows.append(("Informe final", "No solicitado"))
+    else:
+        rows.extend(
+            [
+                ("Evaluación", f"Top-K {evaluation.top_k} por query"),
+                ("RRF evaluator", str(evaluation.rrf_constant)),
+                ("Informe final", str(evaluation.final_output)),
+            ]
+        )
     box_width = len(rule(" ", omit=2))
     content_width = box_width - 2
     label_width = 13
@@ -209,7 +333,7 @@ class ProgressBar:
 
 
 def run_with_progress(command: Sequence[str]) -> int:
-    section("04", "PROGRESO", "El avance representa archivos examinados por cada modelo.")
+    section("05", "PROGRESO", "El avance representa archivos examinados por cada modelo.")
     progress = ProgressBar()
     completed_models: set[str] = set()
     discovered = 0
@@ -261,14 +385,27 @@ def run_with_progress(command: Sequence[str]) -> int:
 def run_interactive(
     config: object,
     validate_directories: Callable[[object, Path], None],
-    build_command: Callable[[object, Path, list[str], str], list[str]],
+    build_command: Callable[
+        [object, Path, list[str], str, FinalEvaluationOptions | None], list[str]
+    ],
 ) -> int:
     configure_output_encoding()
     banner()
     evidence = prompt_directory()
     queries = prompt_queries()
     validate_directories(config, evidence)
-    show_summary(config, evidence, queries)
+    timestamp = datetime.now()
+    report_name = f"{config.report_prefix}_{timestamp:%Y%m%d_%H%M%S}.csv"
+    final_name = f"{config.report_prefix}_{timestamp:%Y%m%d_%H%M%S}_final.csv"
+    audit_output = config.output_directory / report_name
+    evaluation = prompt_final_evaluation(config, audit_output, final_name)
+    show_summary(
+        config,
+        evidence,
+        queries,
+        audit_output=audit_output,
+        evaluation=evaluation,
+    )
     if not confirm():
         print(styled("\n  Operación cancelada. No se generaron artefactos.", YELLOW))
         return 0
@@ -276,11 +413,16 @@ def run_interactive(
     config.output_directory.mkdir(parents=True, exist_ok=True)
     config.clip_cache_directory.mkdir(parents=True, exist_ok=True)
     config.hf_cache_directory.mkdir(parents=True, exist_ok=True)
-    report_name = f"{config.report_prefix}_{datetime.now():%Y%m%d_%H%M%S}.csv"
-    return_code = run_with_progress(build_command(config, evidence, queries, report_name))
+    if evaluation is not None:
+        evaluation.final_output.parent.mkdir(parents=True, exist_ok=True)
+    return_code = run_with_progress(
+        build_command(config, evidence, queries, report_name, evaluation)
+    )
     if return_code == 0:
         print(styled("\n  ✓ BÚSQUEDA FINALIZADA", BOLD, GREEN))
-        print(f"  Reporte: {styled(str(config.output_directory / report_name), CYAN)}")
+        print(f"  Auditoría: {styled(str(audit_output), CYAN)}")
+        if evaluation is not None:
+            print(f"  Informe final: {styled(str(evaluation.final_output), CYAN)}")
     else:
         print(styled(f"\n  ✕ La búsqueda terminó con código {return_code}.", BOLD, RED))
     return return_code

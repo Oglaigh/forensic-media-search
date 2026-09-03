@@ -10,14 +10,16 @@ from typing import Callable, Mapping, Sequence
 
 from .models import VisionLanguageModel
 from .queries import QuerySpec
-from .ranking import FusedCandidate, PerQueryTopK, fuse_rankings
+from .ranking import EvaluatedCandidate, FusedCandidate, PerQueryTopK, evaluate_files, fuse_rankings
 from .reporting import (
     ErrorJournal,
     build_rows,
+    build_final_rows,
     display_path,
     utc_timestamp,
     write_all_results_csv,
     write_csv,
+    write_final_csv,
 )
 from .scanner import (
     ManifestEntry,
@@ -39,6 +41,9 @@ class SearchConfig:
     rrf_constant: int
     display_root: str | None = None
     max_images: int | None = None
+    final_output_path: Path | None = None
+    evaluator_top_k: int | None = None
+    evaluator_rrf_constant: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +66,8 @@ class SearchResult:
     output_path: Path
     per_query_counts: dict[str, dict[str, int]]
     model_metadata: dict[str, dict[str, str | None]]
+    evaluated_candidates: list[EvaluatedCandidate]
+    final_output_path: Path | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,10 +346,28 @@ def run_search(
     root = config.evidence_root.resolve(strict=True)
     output = config.output_path.resolve(strict=False)
     validate_artifact_path(root, output)
+    if (config.final_output_path is None) != (config.evaluator_top_k is None):
+        raise ValueError("final_output_path and evaluator_top_k must be provided together")
+    if config.evaluator_top_k is not None and config.evaluator_top_k <= 0:
+        raise ValueError("evaluator_top_k must be greater than zero")
+    if config.evaluator_rrf_constant is not None and config.evaluator_rrf_constant < 0:
+        raise ValueError("evaluator_rrf_constant must be non-negative")
+    if config.evaluator_rrf_constant is not None and config.final_output_path is None:
+        raise ValueError("evaluator_rrf_constant requires final_output_path")
+    final_output = (
+        config.final_output_path.resolve(strict=False)
+        if config.final_output_path is not None else None
+    )
     manifest = output.with_suffix(output.suffix + ".manifest.jsonl")
     errors = output.with_suffix(output.suffix + ".errors.jsonl")
     validate_artifact_path(root, manifest)
     validate_artifact_path(root, errors)
+    if final_output is not None:
+        validate_artifact_path(root, final_output)
+        if final_output in {output, manifest, errors}:
+            raise ValueError(
+                "final output must be different from audit, manifest, and error outputs"
+            )
 
     started = perf_counter()
     model_metadata: dict[str, dict[str, str | None]] = {}
@@ -395,15 +420,43 @@ def run_search(
         query_order=[query.query_id for query in config.queries],
     )
     entries = _candidate_entries(manifest, candidates)
+    scan_timestamp = utc_timestamp()
     rows = build_rows(
         candidates,
         entries,
         {query.query_id: query for query in config.queries},
         display_root=config.display_root,
         model_metadata=model_metadata,
-        scan_timestamp=utc_timestamp(),
+        scan_timestamp=scan_timestamp,
     )
+    # Audit evidence is always committed before the optional consolidation stage.
     write_csv(rows, output)
+    evaluated_candidates: list[EvaluatedCandidate] = []
+    if final_output is not None:
+        evaluator_rrf_constant = (
+            60 if config.evaluator_rrf_constant is None
+            else config.evaluator_rrf_constant
+        )
+        evaluated_candidates = evaluate_files(
+            candidates,
+            evaluator_top_k=config.evaluator_top_k,
+            rrf_constant=evaluator_rrf_constant,
+            query_order=[query.query_id for query in config.queries],
+        )
+        final_entries = _entries_for_file_ids(
+            manifest, {candidate.file_id for candidate in evaluated_candidates}
+        )
+        final_rows = build_final_rows(
+            evaluated_candidates,
+            final_entries,
+            {query.query_id: query for query in config.queries},
+            display_root=config.display_root,
+            scan_timestamp=scan_timestamp,
+            evaluator_top_k=config.evaluator_top_k,
+            evaluator_rrf_constant=evaluator_rrf_constant,
+            audit_report=output,
+        )
+        write_final_csv(final_rows, final_output)
     total_seconds = perf_counter() - started
     return SearchResult(
         candidates=candidates,
@@ -418,4 +471,6 @@ def run_search(
             for model_id, per_query in rankings.items()
         },
         model_metadata=model_metadata,
+        evaluated_candidates=evaluated_candidates,
+        final_output_path=final_output,
     )

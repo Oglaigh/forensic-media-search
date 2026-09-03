@@ -91,9 +91,15 @@ def test_topk_and_fusion_are_deterministic_on_ties() -> None:
     )
     assert [(item.query_id, item.file_id) for item in first] == [
         ("q0001", 2),
-        ("q0002", 2),
         ("q0001", 5),
+        ("q0002", 2),
         ("q0002", 5),
+    ]
+    assert [(item.query_id, item.final_rank) for item in first] == [
+        ("q0001", 1),
+        ("q0001", 2),
+        ("q0002", 1),
+        ("q0002", 2),
     ]
     assert first == second
 
@@ -104,4 +110,3 @@ def test_invalid_scores_and_dimensions_are_rejected() -> None:
         topk.update_batch([1], [[0.1]])
     with pytest.raises(ValueError, match="finite"):
         topk.update_batch([1], [[float("nan"), 0.2]])
-

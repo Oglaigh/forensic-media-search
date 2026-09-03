@@ -34,6 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--output", default="/output/report.csv")
+    parser.add_argument("--final-output", default=None)
+    parser.add_argument("--evaluator-top-k", type=int, default=None)
+    parser.add_argument("--evaluator-rrf-constant", type=int, default=None)
     parser.add_argument("--display-root", default=None)
     parser.add_argument("--siglip-model", default="google/siglip2-base-patch16-224")
     parser.add_argument("--clip-model", "--model", dest="clip_model", default=None)
@@ -63,6 +66,12 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             incompatible.append("--rrf-constant")
         if args.max_images is not None:
             incompatible.append("--max-images")
+        if args.final_output is not None:
+            incompatible.append("--final-output")
+        if args.evaluator_top_k is not None:
+            incompatible.append("--evaluator-top-k")
+        if args.evaluator_rrf_constant is not None:
+            incompatible.append("--evaluator-rrf-constant")
         if incompatible:
             parser.error(
                 "--all-results is incompatible with " + ", ".join(incompatible)
@@ -75,6 +84,14 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("--rrf-constant must be non-negative")
     if args.max_images is not None and args.max_images <= 0:
         parser.error("--max-images must be greater than zero")
+    if (args.final_output is None) != (args.evaluator_top_k is None):
+        parser.error("--final-output and --evaluator-top-k must be provided together")
+    if args.evaluator_top_k is not None and args.evaluator_top_k <= 0:
+        parser.error("--evaluator-top-k must be greater than zero")
+    if args.evaluator_rrf_constant is not None and args.evaluator_rrf_constant < 0:
+        parser.error("--evaluator-rrf-constant must be non-negative")
+    if args.evaluator_rrf_constant is not None and args.final_output is None:
+        parser.error("--evaluator-rrf-constant requires --final-output")
     if args.min_percent is not None or args.reference_cos is not None:
         parser.error(
             "--min-percent and --reference-cos were removed: use per-query --top-k; "
@@ -92,6 +109,22 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             )
 
     evidence_root = root.resolve(strict=True)
+    output_path = Path(args.output).resolve(strict=False)
+    try:
+        validate_artifact_path(evidence_root, output_path)
+    except ValueError:
+        parser.error(f"--output must resolve outside the evidence directory: {args.output}")
+    if args.final_output is not None:
+        final_output = Path(args.final_output).resolve(strict=False)
+        try:
+            validate_artifact_path(evidence_root, final_output)
+        except ValueError:
+            parser.error(
+                "--final-output must resolve outside the evidence directory: "
+                f"{args.final_output}"
+            )
+        if final_output == output_path:
+            parser.error("--final-output must be different from --output")
     cache_locations = [
         ("HF_HOME", os.environ.get("HF_HOME", "/root/.cache/huggingface"))
     ]
@@ -127,6 +160,14 @@ def _print_startup(args: argparse.Namespace) -> None:
     print(f"Batch size         : {args.batch_size}")
     print(f"Top-K              : {args.top_k} per model and query")
     print(f"RRF constant       : {args.rrf_constant}")
+    print(f"Audit report       : {Path(args.output).resolve()}")
+    if args.final_output is not None:
+        print("Final evaluation   : enabled")
+        print(f"Evaluator Top-K    : {args.evaluator_top_k} per query")
+        print(f"Evaluator RRF const: {args.evaluator_rrf_constant}")
+        print(f"Final report       : {Path(args.final_output).resolve()}")
+    else:
+        print("Final evaluation   : disabled")
     if args.max_images is not None:
         print(f"PARTIAL SCAN       : first {args.max_images} discovered images")
     print("Queries:")
@@ -166,6 +207,9 @@ def _print_summary(result: SearchResult, queries_by_id: dict[str, str]) -> None:
     print(f"Total wall time           : {_duration(result.total_seconds)}")
     print(f"Throughput                : {throughput:.1f} images/sec")
     print(f"CSV                       : {result.output_path}")
+    if result.final_output_path is not None:
+        print(f"Final files              : {len(result.evaluated_candidates)}")
+        print(f"Final CSV                : {result.final_output_path}")
     print(f"Manifest                  : {result.manifest_path}")
     print(f"Error journal             : {result.error_log_path}")
     print("Scores and FusionScore are ranking measures, not probabilities.")
@@ -243,6 +287,8 @@ def main(argv: list[str] | None = None) -> int:
     args.top_k = 5000 if args.top_k is None else args.top_k
     args.clip_model = "ViT-B/32" if args.clip_model is None else args.clip_model
     args.rrf_constant = 60 if args.rrf_constant is None else args.rrf_constant
+    if args.final_output is not None and args.evaluator_rrf_constant is None:
+        args.evaluator_rrf_constant = 60
     _print_startup(args)
     models = (
         SigLIP2Model(
@@ -260,6 +306,9 @@ def main(argv: list[str] | None = None) -> int:
             queries=queries, top_k=args.top_k, batch_size=args.batch_size,
             rrf_constant=args.rrf_constant, display_root=args.display_root,
             max_images=args.max_images,
+            final_output_path=(Path(args.final_output) if args.final_output else None),
+            evaluator_top_k=args.evaluator_top_k,
+            evaluator_rrf_constant=args.evaluator_rrf_constant,
         ),
         models,
     )

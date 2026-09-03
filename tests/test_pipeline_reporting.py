@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -91,3 +92,55 @@ def test_pipeline_rejects_report_inside_evidence_before_writing(tmp_path: Path) 
         )
     assert not output.exists()
 
+
+def test_pipeline_writes_audit_then_one_row_per_file_final_report(tmp_path: Path) -> None:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    for value in (10, 20, 30):
+        Image.new("RGB", (1, 1), (value, value, value)).save(evidence / f"{value}.png")
+    audit = tmp_path / "output" / "audit.csv"
+    final = tmp_path / "output" / "final.csv"
+    queries = IdentityQueryProcessor().process(["gato", "perro"])
+    siglip = FakeModel("siglip2", {10: [0.9, 0.9], 20: [0.8, 0.1], 30: [0.1, 0.8]})
+    clip = FakeModel("clip", {10: [0.9, 0.9], 20: [0.8, 0.1], 30: [0.1, 0.8]})
+    result = run_search(
+        SearchConfig(
+            evidence, audit, queries, top_k=3, batch_size=2, rrf_constant=60,
+            final_output_path=final, evaluator_top_k=1, evaluator_rrf_constant=60,
+        ),
+        (siglip, clip), progress=lambda _: None,
+    )
+    assert audit.exists() and final.exists()
+    with audit.open(encoding="utf-8-sig", newline="") as stream:
+        assert len(list(csv.DictReader(stream))) == 6
+    with final.open(encoding="utf-8-sig", newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 1
+    assert rows[0]["StrongQueryCount"] == "2"
+    assert rows[0]["BestQueryRank"] == "1"
+    assert rows[0]["EvaluatorTopK"] == "1"
+    assert rows[0]["EvaluatorRRFConstant"] == "60"
+    assert rows[0]["AuditReport"] == str(audit.resolve())
+    matches = json.loads(rows[0]["QueryMatches"])
+    assert [item["QueryId"] for item in matches] == ["q0001", "q0002"]
+    assert len(result.evaluated_candidates) == 1
+
+
+@pytest.mark.parametrize("suffix", ["", ".manifest.jsonl", ".errors.jsonl"])
+def test_pipeline_rejects_colliding_final_destination(
+    tmp_path: Path, suffix: str
+) -> None:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    queries = IdentityQueryProcessor().process(["query"])
+    output = tmp_path / "report.csv"
+    final = output.with_suffix(output.suffix + suffix) if suffix else output
+    with pytest.raises(ValueError, match="different"):
+        run_search(
+            SearchConfig(
+                evidence, output, queries, 1, 1, 60,
+                final_output_path=final, evaluator_top_k=1,
+            ),
+            (FakeModel("siglip2", {}), FakeModel("clip", {})),
+            progress=lambda _: None,
+        )

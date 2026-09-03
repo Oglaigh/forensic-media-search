@@ -59,6 +59,38 @@ Las revisiones de Transformers, SigLIP2 y OpenAI CLIP están fijadas para mejora
 
 ## Ejecución
 
+La experiencia principal es el programa interactivo de consola. Primero cree la
+configuración local (el archivo `.env` está ignorado por Git):
+
+```powershell
+Copy-Item .env.example .env
+python .\console.py
+```
+
+El asistente solicita evidencia y queries, y después ofrece la consolidación final:
+
+```text
+03  EVALUACIÓN FINAL
+
+¿Desea generar un informe final consolidado? [S/n] ›
+Top-K por query para evaluación [300] ›
+Constante RRF del Evaluator [60] ›
+Ruta del informe final [report_..._final.csv] ›
+```
+
+La ruta puede ser un nombre relativo o una ruta absoluta, pero siempre debe estar
+dentro de `OUTPUT_DIRECTORY`. Antes de iniciar Docker se muestran el audit report,
+los parámetros del Evaluator y el final report. Responder `n` omite únicamente la
+consolidación: el audit report completo se genera siempre.
+
+Top-K, batch size, modelos y rutas base se configuran en `.env`. Los defaults
+interactivos `EVALUATOR_TOP_K=300` y `EVALUATOR_RRF_CONSTANT=60` son opcionales;
+los `.env` existentes continúan siendo válidos. Para un smoke test determinista
+establezca `MAX_IMAGES=100`; déjelo vacío para procesar toda la colección.
+
+La invocación directa del contenedor se conserva como alternativa avanzada y como
+interfaz interna del launcher:
+
 ```powershell
 docker run --rm --gpus all `
   --mount type=bind,source="D:\DiscoPeritado",target=/evidence,readonly `
@@ -72,27 +104,14 @@ docker run --rm --gpus all `
   --query "Es un robot" `
   --top-k 1000 `
   --batch-size 64 `
-  --output /output/report.csv
+  --output /output/audit.csv `
+  --evaluator-top-k 300 `
+  --evaluator-rrf-constant 60 `
+  --final-output /output/final.csv
 ```
 
-La forma recomendada es utilizar el programa interactivo de consola. Primero cree
-la configuración local (el archivo `.env` está ignorado por Git):
-
-```powershell
-Copy-Item .env.example .env
-python .\console.py
-```
-
-El programa solicita y valida primero el directorio de evidencia. Después permite
-ingresar una query por vez; escriba `:q` para finalizar la carga. Antes de iniciar
-Docker muestra el resumen y solicita confirmación. Luego presenta una barra de progreso
-por modelo basada en los archivos realmente examinados. La evidencia se monta siempre
-como `readonly`, y no se crean directorios de salida ni caché si se cancela.
-
-Todos los demás parámetros se configuran en `.env`: imagen Docker, salida, cachés,
-Top-K, batch size, modelos, dispositivo, constante RRF, límite opcional de imágenes
-y prefijo del reporte. Para un smoke test determinista establezca, por ejemplo,
-`MAX_IMAGES=100`; déjelo vacío para procesar toda la colección.
+La evidencia se monta siempre como `readonly`. No se crean directorios de salida ni
+caché si el usuario cancela antes de iniciar la búsqueda.
 
 ## Cachés
 
@@ -101,9 +120,10 @@ y prefijo del reporte. Para un smoke test determinista establezca, por ejemplo,
 
 Los cachés persisten fuera del contenedor. Una segunda ejecución puede verificarse sin red, una vez descargados ambos modelos, agregando `--network none` y las variables `-e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1` al comando Docker.
 
-## Reporte
+## Informes
 
-El CSV contiene una fila por `archivo + query`:
+El **audit report** contiene una fila por `archivo + query` y conserva toda la
+trazabilidad. `FinalRank` comienza en 1 de forma independiente dentro de cada query:
 
 ```csv
 FilePath,OriginalQuery,MatchedQuery,SigLIP2Score,CLIPCos,SigLIP2Rank,CLIPRank,ModelsMatched,FinalRank,FusionScore
@@ -114,6 +134,28 @@ D:\Evidence\IMG001.jpg,Es un robot,Es un robot,0.221234,,820,,SigLIP2,145,0.0011
 `ModelsMatched` vale `SigLIP2`, `CLIP` o `SigLIP2+CLIP`. Si un motor no incluyó la combinación dentro de su Top-K, sus campos de score y rank quedan vacíos; nunca se inventa un cero.
 
 `SigLIP2Score` y `CLIPCos` son similitudes coseno propias de cada modelo. `FusionScore` es una medida de fusión de rankings. Ninguno representa probabilidad, confianza estadística ni porcentaje de certeza.
+
+Si se habilita la evaluación final, se aplica un corte independiente sobre el
+`FinalRank` de cada query. La inclusión es OR: basta con que el archivo esté dentro
+de `EVALUATOR_TOP_K` para una query. Después se consolida una fila por archivo:
+
+```text
+EvaluatorScore = suma de 1 / (EvaluatorRRFConstant + FinalRank)
+```
+
+Sólo aportan las queries dentro del corte. El orden del final report es:
+
+1. `StrongQueryCount` descendente.
+2. `EvaluatorScore` descendente.
+3. `BestQueryRank` ascendente.
+4. Ordinal estable del manifiesto ascendente.
+
+Así, el consenso entre queries tiene prioridad sobre una coincidencia individual
+excelente. `QueryMatches` contiene JSON compacto con todas las queries fuertes, sus
+ranks y contribuciones. El Evaluator usa exclusivamente ranks; nunca compara scores
+de SigLIP2, CLIP o RRF entre queries. `EvaluatorScore` tampoco es una probabilidad.
+El cutoff, la constante y el audit report de origen también quedan registrados para
+reproducir y auditar la consolidación.
 
 Junto al CSV se conservan:
 

@@ -116,17 +116,29 @@ def fuse_rankings(
         )
 
     infinity = float("inf")
-    fused.sort(
-        key=lambda item: (
+
+    def rank_key(item: FusedCandidate) -> tuple:
+        return (
             -item.fusion_score,
             -len(item.ranks),
             min(item.ranks.values()),
             item.siglip2_rank if item.siglip2_rank is not None else infinity,
             item.clip_rank if item.clip_rank is not None else infinity,
-            query_positions.get(item.query_id, unknown_position),
-            item.query_id,
             item.file_id,
         )
-    )
-    return [replace(item, final_rank=rank) for rank, item in enumerate(fused, start=1)]
 
+    per_query: dict[str, list[FusedCandidate]] = {}
+    for item in fused:
+        per_query.setdefault(item.query_id, []).append(item)
+
+    ranked: list[FusedCandidate] = []
+    for query_id in sorted(
+        per_query,
+        key=lambda value: (query_positions.get(value, unknown_position), value),
+    ):
+        ordered = sorted(per_query[query_id], key=rank_key)
+        ranked.extend(
+            replace(item, final_rank=rank)
+            for rank, item in enumerate(ordered, start=1)
+        )
+    return ranked

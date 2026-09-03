@@ -12,7 +12,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable, Mapping, TextIO
 
 from .queries import QuerySpec
-from .ranking import FusedCandidate
+from .ranking import EvaluatedCandidate, FusedCandidate
 from .scanner import ManifestEntry
 
 
@@ -41,6 +41,21 @@ ALL_RESULTS_CSV_FIELDS = (
     "Rank",
     "Model",
     "Revision",
+)
+
+FINAL_CSV_FIELDS = (
+    "FilePath",
+    "EvaluatorRank",
+    "EvaluatorScore",
+    "StrongQueryCount",
+    "BestOriginalQuery",
+    "BestMatchedQuery",
+    "BestQueryRank",
+    "QueryMatches",
+    "EvaluatorTopK",
+    "EvaluatorRRFConstant",
+    "AuditReport",
+    "ScanTimestamp",
 )
 
 
@@ -114,6 +129,48 @@ def build_rows(
     return rows
 
 
+def build_final_rows(
+    candidates: Iterable[EvaluatedCandidate],
+    entries: Mapping[int, ManifestEntry],
+    queries: Mapping[str, QuerySpec],
+    *,
+    display_root: str | None,
+    scan_timestamp: str,
+    evaluator_top_k: int,
+    evaluator_rrf_constant: int,
+    audit_report: Path,
+) -> list[dict[str, Any]]:
+    """Build the one-row-per-file report without consulting model scores."""
+    rows: list[dict[str, Any]] = []
+    for candidate in candidates:
+        best_query = queries[candidate.best_query_id]
+        matches = [
+            {
+                "QueryId": match.query_id,
+                "OriginalQuery": queries[match.query_id].original_query,
+                "MatchedQuery": queries[match.query_id].matched_query,
+                "FinalRank": match.final_rank,
+                "ReciprocalContribution": match.reciprocal_contribution,
+            }
+            for match in candidate.query_matches
+        ]
+        rows.append({
+            "FilePath": display_path(entries[candidate.file_id], display_root),
+            "EvaluatorRank": candidate.evaluator_rank,
+            "EvaluatorScore": candidate.evaluator_score,
+            "StrongQueryCount": candidate.strong_query_count,
+            "BestOriginalQuery": best_query.original_query,
+            "BestMatchedQuery": best_query.matched_query,
+            "BestQueryRank": candidate.best_query_rank,
+            "QueryMatches": json.dumps(matches, ensure_ascii=False, separators=(",", ":")),
+            "EvaluatorTopK": evaluator_top_k,
+            "EvaluatorRRFConstant": evaluator_rrf_constant,
+            "AuditReport": str(audit_report),
+            "ScanTimestamp": scan_timestamp,
+        })
+    return rows
+
+
 def _format_row(row: Mapping[str, Any]) -> dict[str, Any]:
     formatted = dict(row)
     for field in ("SigLIP2Score", "CLIPCos"):
@@ -147,6 +204,36 @@ def write_csv(rows: Iterable[Mapping[str, Any]], output_path: Path) -> None:
             writer.writeheader()
             for row in rows:
                 writer.writerow(_format_row(row))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, destination)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink()
+            except FileNotFoundError:
+                pass
+
+
+def write_final_csv(rows: Iterable[Mapping[str, Any]], output_path: Path) -> None:
+    """Atomically write the optional one-row-per-file Evaluator report."""
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8-sig", newline="",
+            prefix=f".{destination.name}.", suffix=".tmp",
+            dir=destination.parent, delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            writer = csv.DictWriter(stream, fieldnames=FINAL_CSV_FIELDS)
+            writer.writeheader()
+            for row in rows:
+                formatted = dict(row)
+                formatted["EvaluatorScore"] = f'{formatted["EvaluatorScore"]:.12f}'
+                writer.writerow(formatted)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary_name, destination)

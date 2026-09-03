@@ -67,6 +67,22 @@ def _optional_positive_int(values: dict[str, str], key: str) -> int | None:
     return value
 
 
+def _optional_integer_with_default(
+    values: dict[str, str], key: str, *, default: int, minimum: int
+) -> int:
+    raw = values.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ConfigurationError(f"{key} debe ser un numero entero.") from error
+    if value < minimum:
+        qualifier = "mayor que cero" if minimum == 1 else "no negativo"
+        raise ConfigurationError(f"{key} debe ser {qualifier}.")
+    return value
+
+
 def _config_path(raw: str) -> Path:
     path = Path(raw).expanduser()
     return (path if path.is_absolute() else PROJECT_ROOT / path).resolve(strict=False)
@@ -86,6 +102,8 @@ class LauncherConfig:
     rrf_constant: int
     max_images: int | None
     report_prefix: str
+    evaluator_top_k: int
+    evaluator_rrf_constant: int
 
     @classmethod
     def from_env(cls, values: dict[str, str]) -> "LauncherConfig":
@@ -108,6 +126,12 @@ class LauncherConfig:
             rrf_constant=_integer(values, "RRF_CONSTANT", minimum=0),
             max_images=_optional_positive_int(values, "MAX_IMAGES"),
             report_prefix=prefix,
+            evaluator_top_k=_optional_integer_with_default(
+                values, "EVALUATOR_TOP_K", default=300, minimum=1
+            ),
+            evaluator_rrf_constant=_optional_integer_with_default(
+                values, "EVALUATOR_RRF_CONSTANT", default=60, minimum=0
+            ),
         )
 
 
@@ -151,8 +175,10 @@ def validate_artifact_directories(config: LauncherConfig, evidence: Path) -> Non
         ("CLIP_CACHE_DIRECTORY", config.clip_cache_directory),
         ("HF_CACHE_DIRECTORY", config.hf_cache_directory),
     ):
-        if _is_within(path, evidence):
-            raise ConfigurationError(f"{label} debe estar fuera del directorio de evidencia.")
+        if _is_within(path, evidence) or _is_within(evidence, path):
+            raise ConfigurationError(
+                f"{label} no debe solaparse con el directorio de evidencia."
+            )
 
 
 def print_confirmation(config: LauncherConfig, evidence: Path, queries: list[str]) -> None:
@@ -178,7 +204,11 @@ def confirm(input_fn=input) -> bool:
 
 
 def build_docker_command(
-    config: LauncherConfig, evidence: Path, queries: list[str], report_name: str
+    config: LauncherConfig,
+    evidence: Path,
+    queries: list[str],
+    report_name: str,
+    evaluation: object | None = None,
 ) -> list[str]:
     command = ["docker", "run", "--rm", "--env", "PYTHONUNBUFFERED=1"]
     if config.device == "cuda":
@@ -197,6 +227,26 @@ def build_docker_command(
     ]
     if config.max_images is not None:
         command += ["--max-images", str(config.max_images)]
+    if evaluation is not None:
+        final_output = Path(evaluation.final_output).resolve(strict=False)
+        try:
+            relative_output = final_output.relative_to(config.output_directory)
+        except ValueError as error:
+            raise ConfigurationError(
+                "La ruta del informe final debe estar dentro de OUTPUT_DIRECTORY."
+            ) from error
+        if final_output == (config.output_directory / report_name).resolve(strict=False):
+            raise ConfigurationError(
+                "El informe final debe tener una ruta diferente al informe de auditoria."
+            )
+        command += [
+            "--evaluator-top-k",
+            str(evaluation.top_k),
+            "--evaluator-rrf-constant",
+            str(evaluation.rrf_constant),
+            "--final-output",
+            f"/output/{relative_output.as_posix()}",
+        ]
     for query in queries:
         command += ["--query", query]
     return command

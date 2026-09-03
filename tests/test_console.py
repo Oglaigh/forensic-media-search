@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,12 +41,65 @@ def test_docker_command_mounts_evidence_read_only_and_appends_queries(tmp_path: 
     assert command[-4:] == ["--query", "perro", "--query", "robot"]
 
 
+def test_docker_command_adds_evaluator_arguments_and_container_output_path(
+    tmp_path: Path,
+) -> None:
+    config = console.LauncherConfig.from_env(_env(tmp_path))
+    final_output = config.output_directory / "review" / "final.csv"
+    evaluation = SimpleNamespace(
+        top_k=300,
+        rrf_constant=60,
+        final_output=final_output,
+    )
+
+    command = console.build_docker_command(
+        config,
+        tmp_path.resolve(),
+        ["perro"],
+        "audit.csv",
+        evaluation,
+    )
+
+    assert command[command.index("--evaluator-top-k") + 1] == "300"
+    assert command[command.index("--evaluator-rrf-constant") + 1] == "60"
+    assert command[command.index("--final-output") + 1] == "/output/review/final.csv"
+    assert "--output" in command
+
+
+def test_docker_command_rejects_final_output_outside_output_directory(
+    tmp_path: Path,
+) -> None:
+    config = console.LauncherConfig.from_env(_env(tmp_path))
+    evaluation = SimpleNamespace(
+        top_k=300,
+        rrf_constant=60,
+        final_output=tmp_path / "outside.csv",
+    )
+
+    with pytest.raises(console.ConfigurationError, match="OUTPUT_DIRECTORY"):
+        console.build_docker_command(
+            config, tmp_path.resolve(), ["perro"], "audit.csv", evaluation
+        )
+
+
 def test_artifacts_inside_evidence_are_rejected(tmp_path: Path) -> None:
     values = _env(tmp_path)
     values["OUTPUT_DIRECTORY"] = str(tmp_path / "evidence" / "output")
     evidence = tmp_path / "evidence"
     evidence.mkdir()
-    with pytest.raises(console.ConfigurationError, match="fuera"):
+    with pytest.raises(console.ConfigurationError, match="solaparse"):
+        console.validate_artifact_directories(
+            console.LauncherConfig.from_env(values), evidence.resolve()
+        )
+
+
+def test_writable_mount_ancestor_of_evidence_is_rejected(tmp_path: Path) -> None:
+    evidence = tmp_path / "case" / "evidence"
+    evidence.mkdir(parents=True)
+    values = _env(tmp_path)
+    values["OUTPUT_DIRECTORY"] = str(evidence.parent)
+
+    with pytest.raises(console.ConfigurationError, match="solaparse"):
         console.validate_artifact_directories(
             console.LauncherConfig.from_env(values), evidence.resolve()
         )
@@ -56,3 +110,21 @@ def test_configuration_rejects_invalid_numeric_value(tmp_path: Path) -> None:
     values["BATCH_SIZE"] = "0"
     with pytest.raises(console.ConfigurationError, match="mayor que cero"):
         console.LauncherConfig.from_env(values)
+
+
+def test_evaluator_defaults_do_not_require_new_env_values(tmp_path: Path) -> None:
+    config = console.LauncherConfig.from_env(_env(tmp_path))
+
+    assert config.evaluator_top_k == 300
+    assert config.evaluator_rrf_constant == 60
+
+
+def test_evaluator_env_defaults_are_configurable(tmp_path: Path) -> None:
+    values = _env(tmp_path)
+    values["EVALUATOR_TOP_K"] = "125"
+    values["EVALUATOR_RRF_CONSTANT"] = "42"
+
+    config = console.LauncherConfig.from_env(values)
+
+    assert config.evaluator_top_k == 125
+    assert config.evaluator_rrf_constant == 42

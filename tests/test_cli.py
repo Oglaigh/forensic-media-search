@@ -50,6 +50,29 @@ def test_all_results_rejects_ensemble_options(tmp_path: Path, capsys) -> None:
     assert "--all-results is incompatible" in capsys.readouterr().err
 
 
+def test_cli_requires_paired_evaluator_options(tmp_path: Path, capsys) -> None:
+    parser = build_parser()
+    args = parser.parse_args([
+        "--directory", str(tmp_path), "--query", "perro", "--device", "cpu",
+        "--final-output", str(tmp_path.parent / "final.csv"),
+    ])
+    with pytest.raises(SystemExit):
+        validate_args(parser, args)
+    assert "must be provided together" in capsys.readouterr().err
+
+
+def test_all_results_rejects_evaluator_options(tmp_path: Path, capsys) -> None:
+    parser = build_parser()
+    args = parser.parse_args([
+        "--directory", str(tmp_path), "--query", "perro", "--device", "cpu",
+        "--all-results", "--final-output", str(tmp_path.parent / "final.csv"),
+        "--evaluator-top-k", "100",
+    ])
+    with pytest.raises(SystemExit):
+        validate_args(parser, args)
+    assert "--all-results is incompatible" in capsys.readouterr().err
+
+
 def test_all_results_cli_never_constructs_clip(tmp_path: Path, monkeypatch) -> None:
     siglipd = object()
     sentinel_result = object()
