@@ -7,7 +7,14 @@ import os
 from pathlib import Path
 
 from .models import OpenAIClipModel, SigLIP2Model
-from .pipeline import SearchConfig, SearchResult, run_search
+from .pipeline import (
+    AllResultsConfig,
+    AllResultsResult,
+    SearchConfig,
+    SearchResult,
+    run_all_results,
+    run_search,
+)
 from .queries import IdentityQueryProcessor
 from .scanner import validate_artifact_path
 
@@ -22,15 +29,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--directory", required=True, help="Evidence directory.")
     parser.add_argument("--query", action="append", required=True)
     parser.add_argument(
-        "--top-k", type=int, default=5000,
-        help="Candidates retained independently per model and query.",
+        "--top-k", type=int, default=None,
+        help="Candidates retained independently per model and query. Default: 5000.",
     )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--output", default="/output/report.csv")
     parser.add_argument("--display-root", default=None)
     parser.add_argument("--siglip-model", default="google/siglip2-base-patch16-224")
-    parser.add_argument("--clip-model", "--model", dest="clip_model", default="ViT-B/32")
-    parser.add_argument("--rrf-constant", type=int, default=60)
+    parser.add_argument("--clip-model", "--model", dest="clip_model", default=None)
+    parser.add_argument("--rrf-constant", type=int, default=None)
+    parser.add_argument(
+        "--all-results", action="store_true",
+        help="Diagnostic SigLIP2-only full ranking; disables Top-K, CLIP, and RRF.",
+    )
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument(
         "--max-images", type=int, default=None,
@@ -42,11 +53,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if args.top_k <= 0:
+    if args.all_results:
+        incompatible = []
+        if args.top_k is not None:
+            incompatible.append("--top-k")
+        if args.clip_model is not None:
+            incompatible.append("--clip-model/--model")
+        if args.rrf_constant is not None:
+            incompatible.append("--rrf-constant")
+        if args.max_images is not None:
+            incompatible.append("--max-images")
+        if incompatible:
+            parser.error(
+                "--all-results is incompatible with " + ", ".join(incompatible)
+            )
+    if args.top_k is not None and args.top_k <= 0:
         parser.error("--top-k must be greater than zero")
     if args.batch_size <= 0:
         parser.error("--batch-size must be greater than zero")
-    if args.rrf_constant < 0:
+    if args.rrf_constant is not None and args.rrf_constant < 0:
         parser.error("--rrf-constant must be non-negative")
     if args.max_images is not None and args.max_images <= 0:
         parser.error("--max-images must be greater than zero")
@@ -67,10 +92,14 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             )
 
     evidence_root = root.resolve(strict=True)
-    for label, value in (
-        ("HF_HOME", os.environ.get("HF_HOME", "/root/.cache/huggingface")),
-        ("CLIP_CACHE_DIR", os.environ.get("CLIP_CACHE_DIR", "/root/.cache/clip")),
-    ):
+    cache_locations = [
+        ("HF_HOME", os.environ.get("HF_HOME", "/root/.cache/huggingface"))
+    ]
+    if not args.all_results:
+        cache_locations.append(
+            ("CLIP_CACHE_DIR", os.environ.get("CLIP_CACHE_DIR", "/root/.cache/clip"))
+        )
+    for label, value in cache_locations:
         try:
             validate_artifact_path(evidence_root, Path(value).resolve(strict=False))
         except ValueError:
@@ -143,11 +172,77 @@ def _print_summary(result: SearchResult, queries_by_id: dict[str, str]) -> None:
     print("=" * 78)
 
 
+def _print_all_results_startup(args: argparse.Namespace) -> None:
+    print("=" * 78)
+    print("FORENSIC MEDIA SEARCH - SigLIP2 ALL RESULTS DIAGNOSTIC")
+    print("=" * 78)
+    print(f"Directory          : {Path(args.directory).resolve()}")
+    print(f"Device             : {args.device}")
+    if args.device == "cuda":
+        import torch
+        print(f"GPU                : {torch.cuda.get_device_name(0)}")
+    print(f"SigLIP2 model      : {args.siglip_model}")
+    print(f"Batch size         : {args.batch_size}")
+    print("Selection          : all processable images per query")
+    print("CLIP / Top-K / RRF : disabled")
+    print("Queries:")
+    for query in args.query:
+        print(f"  - {query}")
+    print()
+
+
+def _print_all_results_summary(result: AllResultsResult, query_count: int) -> None:
+    model_pass = result.metrics.passes["siglip2"]
+    expected_rows = result.metrics.images_processed * query_count
+    print()
+    print("=" * 78)
+    print("ALL RESULTS DIAGNOSTIC SUMMARY")
+    print("=" * 78)
+    print(f"Images discovered      : {result.metrics.images_discovered}")
+    print(f"Images processed       : {result.metrics.images_processed}")
+    print(f"Decode errors          : {result.metrics.decode_errors}")
+    print(f"Queries                : {query_count}")
+    print(f"Ranking rows           : {len(result.records)}")
+    print(f"Expected rows          : {expected_rows}")
+    print(f"SigLIP2 preparation    : {_duration(result.preparation_seconds)}")
+    print(f"SigLIP2 processing     : {_duration(model_pass.processing_seconds)}")
+    print(f"Total wall time        : {_duration(result.total_seconds)}")
+    print(f"CSV                    : {result.output_path}")
+    print(f"Manifest               : {result.manifest_path}")
+    print(f"Error journal          : {result.error_log_path}")
+    print("Every row is diagnostic ranking output, not necessarily a candidate.")
+    print("SigLIP2Score is cosine similarity, not a probability.")
+    print("=" * 78)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     validate_args(parser, args)
     queries = IdentityQueryProcessor().process(args.query)
+    if args.all_results:
+        _print_all_results_startup(args)
+        result = run_all_results(
+            AllResultsConfig(
+                evidence_root=Path(args.directory),
+                output_path=Path(args.output),
+                queries=queries,
+                batch_size=args.batch_size,
+                display_root=args.display_root,
+            ),
+            SigLIP2Model(
+                args.siglip_model,
+                device=args.device,
+                revision=SIGLIP2_REVISION,
+                cache_dir=os.environ.get("HF_HOME", "/root/.cache/huggingface"),
+            ),
+        )
+        _print_all_results_summary(result, len(queries))
+        return 0
+
+    args.top_k = 5000 if args.top_k is None else args.top_k
+    args.clip_model = "ViT-B/32" if args.clip_model is None else args.clip_model
+    args.rrf_constant = 60 if args.rrf_constant is None else args.rrf_constant
     _print_startup(args)
     models = (
         SigLIP2Model(

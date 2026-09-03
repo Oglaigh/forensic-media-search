@@ -112,6 +112,48 @@ Junto al CSV se conservan:
 - `report.csv.manifest.jsonl`: universo estable de archivos descubierto.
 - `report.csv.errors.jsonl`: errores de filesystem y decoding por motor.
 
+## Diagnóstico SigLIP2 con ranking completo
+
+`--all-results` procesa todo el manifiesto únicamente con SigLIP2. No carga CLIP, no aplica Top-K, no ejecuta RRF y no descarta imágenes procesables. Cada query recibe su propio ranking completo 1-based.
+
+```powershell
+docker run --rm --gpus all `
+  --mount type=bind,source="D:\DiscoPeritado",target=/evidence,readonly `
+  --mount type=bind,source="$PWD\output",target=/output `
+  --mount type=bind,source="$PWD\models\huggingface",target=/root/.cache/huggingface `
+  forensic-media-search:dev `
+  --directory /evidence `
+  --display-root "D:\DiscoPeritado" `
+  --query "una fotografía de un perro" `
+  --all-results `
+  --batch-size 64 `
+  --output /output/siglip2-all-results.csv
+```
+
+El CSV diagnóstico contiene:
+
+```text
+FilePath,Query,SigLIP2Score,Rank,Model,Revision
+```
+
+`--all-results` es incompatible con `--top-k`, `--clip-model`/`--model`, `--rrf-constant` y `--max-images`.
+
+### Semántica de SigLIP2Score
+
+El adapter obtiene `get_image_features()` y `get_text_features()`, convierte los embeddings a FP32, los normaliza L2 y calcula:
+
+```text
+SigLIP2Score = cosine(normalized_image_embedding, normalized_text_embedding)
+```
+
+El `forward()` oficial del checkpoint calcula sus logits como:
+
+```text
+logit = cosine * exp(logit_scale) + logit_bias
+```
+
+El checkpoint fijado posee `logit_scale` y `logit_bias` aprendidos. Como ambos son escalares globales y `exp(logit_scale)` es positivo, transformar cosenos a logits no cambia el orden de las imágenes dentro de una query. El coseno omite la calibración afín usada por el modelo antes de sigmoid, pero no pierde información de ranking. Por eso el modo diagnóstico conserva el score coseno existente y no lo presenta como probabilidad.
+
 ## Seguridad forense
 
 - La evidencia se monta `readonly` y sólo se abre en modo lectura.

@@ -34,6 +34,15 @@ CSV_FIELDS = (
     "ScanTimestamp",
 )
 
+ALL_RESULTS_CSV_FIELDS = (
+    "FilePath",
+    "Query",
+    "SigLIP2Score",
+    "Rank",
+    "Model",
+    "Revision",
+)
+
 
 class ErrorJournal:
     """Incremental JSONL journal stored outside evidence."""
@@ -153,3 +162,39 @@ def write_csv(rows: Iterable[Mapping[str, Any]], output_path: Path) -> None:
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
+
+def write_all_results_csv(
+    rows: Iterable[Mapping[str, Any]], output_path: Path
+) -> None:
+    """Atomically write a complete SigLIP2 diagnostic ranking."""
+
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8-sig",
+            newline="",
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            dir=destination.parent,
+            delete=False,
+        ) as stream:
+            temporary_name = stream.name
+            writer = csv.DictWriter(stream, fieldnames=ALL_RESULTS_CSV_FIELDS)
+            writer.writeheader()
+            for row in rows:
+                formatted = dict(row)
+                formatted["SigLIP2Score"] = f'{formatted["SigLIP2Score"]:.6f}'
+                writer.writerow(formatted)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, destination)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink()
+            except FileNotFoundError:
+                pass
