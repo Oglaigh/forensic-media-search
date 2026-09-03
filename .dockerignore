@@ -1,0 +1,11 @@
+evidence/
+models/
+output/
+
+.git/
+.codex/
+.agents/
+
+__pycache__/
+*.pyc
+*.pyo

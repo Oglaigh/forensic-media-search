@@ -1,0 +1,14 @@
+services:
+  forensic-clip:
+    image: forensic-media-search:dev
+    build: .
+
+    gpus: all
+
+    volumes:
+      - ./evidence:/evidence:ro
+      - ./models:/root/.cache/clip
+      - ./output:/output
+
+    environment:
+      PYTHONUNBUFFERED: "1"

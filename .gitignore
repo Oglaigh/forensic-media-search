@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment variables
+.env
+.env.*
+
+# Models / ML artifacts
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+
+# Generated reports
+output/
+outputs/
+reports/
+*.csv
+
+# Temporary/cache
+.cache/
+tmp/
+temp/
