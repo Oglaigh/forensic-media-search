@@ -1,209 +1,138 @@
 # Forensic Media Search
 
-Aplicación de consola para analizar recursivamente imágenes dentro de un directorio o disco y buscar coincidencias visuales a partir de una o más consultas de texto utilizando CLIP.
+Aplicación offline de consola para triage semántico de colecciones de imágenes. Recorre un directorio de evidencia de forma recursiva y devuelve candidatos para revisión humana; ningún resultado prueba que un objeto o atributo exista.
 
-El sistema procesa las imágenes con GPU, muestra las coincidencias por consola y genera un archivo CSV.
+## Arquitectura
 
-Ejemplo de salida:
+La búsqueda utiliza dos motores independientes:
 
-```text
-FilePath | % | Cos | MatchedQuery
-```
+1. SigLIP 2 `google/siglip2-base-patch16-224` como motor principal.
+2. OpenAI CLIP `ViT-B/32` como motor secundario.
 
-> El valor `%` es un score heurístico de coincidencia. No representa una probabilidad estadística.  
-> `Cos` corresponde a la similitud coseno calculada por el modelo.
+Los motores se ejecutan secuencialmente para reducir presión sobre la VRAM. Cada uno procesa el mismo manifiesto estable de archivos, pero utiliza su propio preprocessing y su propia escala de similitud.
 
----
-
-## 1. Requisitos de la computadora
-
-### Recomendado
-
-- Windows 10/11 de 64 bits
-- CPU: 8 núcleos o superior
-- RAM: 16 GB mínimo, 32 GB recomendado
-- GPU NVIDIA con soporte CUDA
-- VRAM:
-  - 8 GB mínimo
-  - 16 GB recomendado
-- Docker Desktop
-- WSL2 habilitado
-- Driver NVIDIA actualizado
-- Espacio libre:
-  - al menos 10 GB para Docker, PyTorch y modelos
-  - espacio adicional según el tamaño de la evidencia y los reportes
-
-Configuración utilizada durante el desarrollo:
+`--top-k K` conserva K candidatos **por modelo y por query**. Con dos queries se mantienen cuatro listas independientes:
 
 ```text
-GPU: NVIDIA GeForce RTX 4080
-VRAM: 16 GB
-PyTorch: 2.12.1
-CUDA Runtime: 13.2
-Modelo inicial: OpenAI CLIP ViT-B/32
+SigLIP2 / query 1 -> Top K
+SigLIP2 / query 2 -> Top K
+CLIP    / query 1 -> Top K
+CLIP    / query 2 -> Top K
 ```
 
-### Verificar GPU
+No se aplica un `argmax` global entre queries. Una imagen puede aparecer para varias queries. Luego se unifican únicamente resultados con la misma clave `archivo + query`.
 
-Desde CMD:
+El orden final usa Reciprocal Rank Fusion:
 
-```cmd
+```text
+FusionScore = 1 / (60 + SigLIP2Rank) + 1 / (60 + CLIPRank)
+```
+
+Un motor que no recuperó esa combinación no aporta un término. Los scores de SigLIP2 y CLIP nunca se comparan ni combinan directamente.
+
+## Requisitos
+
+- Windows 10/11 con WSL2 y Docker Desktop.
+- GPU NVIDIA y drivers compatibles con CUDA.
+- Desarrollo validado para NVIDIA GeForce RTX 4080 de 16 GB.
+- Al menos 16 GB de RAM; 32 GB recomendados.
+- Espacio para la imagen Docker y los cachés de ambos modelos.
+
+La CLI exige CUDA por defecto. Para un diagnóstico deliberado sin GPU puede indicarse `--device cpu`; nunca hay fallback silencioso.
+
+Verificación básica:
+
+```powershell
 nvidia-smi
-```
-
-Para comprobar que Docker puede utilizar la GPU:
-
-```cmd
 docker run --rm --gpus all ubuntu nvidia-smi
 ```
 
-La GPU NVIDIA debe aparecer dentro del contenedor.
+## Build
 
----
+Desde la raíz del repositorio:
 
-## 2. Instalación con Docker
-
-### 2.1 Instalar Docker Desktop
-
-Instalar Docker Desktop para Windows y habilitar:
-
-```text
-Use the WSL 2 based engine
-```
-
-Docker debe estar iniciado antes de ejecutar la aplicación.
-
-### 2.2 Clonar o copiar el proyecto
-
-Ejemplo:
-
-```cmd
-cd C:\Repos
-git clone <URL_DEL_REPOSITORIO> forensic-media-search
-cd forensic-media-search
-```
-
-Si el proyecto ya fue copiado manualmente:
-
-```cmd
-cd C:\Repos\forensic-media-search
-```
-
-### 2.3 Construir la imagen
-
-Ejecutar:
-
-```cmd
+```powershell
 docker build -t forensic-media-search:dev .
 ```
 
-La primera compilación puede tardar varios minutos porque descarga Python, PyTorch, CUDA y CLIP.
+Las revisiones de Transformers, SigLIP2 y OpenAI CLIP están fijadas para mejorar la reproducibilidad.
 
-### 2.4 Crear directorios locales
+## Ejecución
 
-Desde la raíz del proyecto:
-
-```cmd
-mkdir models
-mkdir output
-```
-
-`models` se utiliza como caché de modelos.
-
-`output` contiene los archivos CSV generados.
-
----
-
-## 3. Ejecución desde CMD
-
-La aplicación recibe:
-
-```text
---directory       Directorio montado dentro del contenedor
---query           Consulta visual. Puede repetirse varias veces
---min-percent     Score mínimo de coincidencia
---batch-size      Cantidad de imágenes procesadas por lote
---model           Modelo CLIP
---output          Archivo CSV de salida
---display-root    Ruta original que debe mostrarse en el informe
-```
-
-### Ejemplo
-
-Analizar:
-
-```text
-D:\DiscoPeritado
-```
-
-Buscando:
-
-```text
-a house with a red roof
-a house with a black door
-```
-
-Ejecutar desde CMD:
-
-```cmd
-docker run --rm --gpus all ^
-  --mount type=bind,source="D:\DiscoPeritado",target=/evidence,readonly ^
-  --mount type=bind,source="%cd%\output",target=/output ^
-  --mount type=bind,source="%cd%\models",target=/root/.cache/clip ^
-  forensic-media-search:dev ^
-  --directory /evidence ^
-  --display-root "D:\DiscoPeritado" ^
-  --query "a house with a red roof" ^
-  --query "a house with a black door" ^
-  --min-percent 75 ^
-  --batch-size 64 ^
-  --model "ViT-B/32" ^
+```powershell
+docker run --rm --gpus all `
+  --mount type=bind,source="D:\DiscoPeritado",target=/evidence,readonly `
+  --mount type=bind,source="$PWD\output",target=/output `
+  --mount type=bind,source="$PWD\models",target=/root/.cache/clip `
+  --mount type=bind,source="$PWD\models\huggingface",target=/root/.cache/huggingface `
+  forensic-media-search:dev `
+  --directory /evidence `
+  --display-root "D:\DiscoPeritado" `
+  --query "Es un perro" `
+  --query "Es un robot" `
+  --top-k 1000 `
+  --batch-size 64 `
   --output /output/report.csv
 ```
 
-El directorio de evidencia se monta como:
+También puede utilizarse el wrapper PowerShell:
 
-```text
-readonly
+```powershell
+.\run.ps1 -Directory "D:\DiscoPeritado" `
+  -Query "Es un perro","Es un robot" `
+  -TopK 1000 `
+  -BatchSize 64
 ```
 
-por lo que el contenedor no puede modificar los archivos analizados.
+Para un smoke test determinista sobre las primeras 100 imágenes agregue `--max-images 100`. La consola lo identifica como un scan parcial.
 
-### Resultado por consola
+## Cachés
 
-Ejemplo:
+- OpenAI CLIP: `models/` montado en `/root/.cache/clip`.
+- Hugging Face/SigLIP2: `models/huggingface/` montado en `/root/.cache/huggingface`.
 
-```text
-91.82% | cos=0.321386 | D:\DiscoPeritado\DCIM\IMG_4821.jpg
-         | a house with a red roof
+Los cachés persisten fuera del contenedor. Una segunda ejecución puede verificarse sin red, una vez descargados ambos modelos, agregando `--network none` y las variables `-e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1` al comando Docker.
 
-86.47% | cos=0.302653 | D:\DiscoPeritado\Pictures\IMG_1932.jpg
-         | a house with a black door
-```
+## Reporte
 
-### Archivo CSV
-
-Al finalizar se genera:
-
-```text
-output\report.csv
-```
-
-Ejemplo:
+El CSV contiene una fila por `archivo + query`:
 
 ```csv
-FilePath,%,Cos,MatchedQuery
-D:\DiscoPeritado\DCIM\IMG_4821.jpg,91.82,0.321386,a house with a red roof
-D:\DiscoPeritado\Pictures\IMG_1932.jpg,86.47,0.302653,a house with a black door
+FilePath,OriginalQuery,MatchedQuery,SigLIP2Score,CLIPCos,SigLIP2Rank,CLIPRank,ModelsMatched,FinalRank,FusionScore
+D:\Evidence\IMG001.jpg,Es un perro,Es un perro,0.312345,0.287654,12,19,SigLIP2+CLIP,1,0.027149321267
+D:\Evidence\IMG001.jpg,Es un robot,Es un robot,0.221234,,820,,SigLIP2,145,0.001136363636
 ```
 
----
+`ModelsMatched` vale `SigLIP2`, `CLIP` o `SigLIP2+CLIP`. Si un motor no incluyó la combinación dentro de su Top-K, sus campos de score y rank quedan vacíos; nunca se inventa un cero.
 
-## Consideraciones
+`SigLIP2Score` y `CLIPCos` son similitudes coseno propias de cada modelo. `FusionScore` es una medida de fusión de rankings. Ninguno representa probabilidad, confianza estadística ni porcentaje de certeza.
 
-- El análisis es recursivo.
-- Las consultas múltiples se evalúan con semántica OR: se conserva la mejor coincidencia de cada imagen.
-- Los archivos que no puedan abrirse se informan como error y el análisis continúa.
-- La evidencia debe mantenerse en modo solo lectura.
-- Los resultados generados deben guardarse fuera del directorio analizado.
-- El score del modelo se utiliza para seleccionar candidatos que luego deben ser revisados por un analista/perito.
+Junto al CSV se conservan:
+
+- `report.csv.manifest.jsonl`: universo estable de archivos descubierto.
+- `report.csv.errors.jsonl`: errores de filesystem y decoding por motor.
+
+## Seguridad forense
+
+- La evidencia se monta `readonly` y sólo se abre en modo lectura.
+- No se modifican imágenes ni metadatos.
+- No se escriben thumbnails ni temporales dentro de evidencia.
+- Archivos corruptos se registran y el scan continúa.
+- CSV, manifiesto, errores y cachés se escriben fuera de evidencia.
+- La CLI rechaza `HF_HOME` o `CLIP_CACHE_DIR` si resuelven dentro de evidencia.
+- `FilePath` conserva la ruta original mediante `--display-root` cuando se proporciona.
+
+## Tests
+
+Los unit tests usan adapters falsos y no descargan modelos:
+
+```powershell
+python -m pytest -q
+docker compose config
+```
+
+Los tests cubren Top-K independiente por query, unión y RRF por `archivo + query`, candidatos recuperados por uno o ambos motores, empates deterministas, corruptos, campos CSV vacíos y apertura read-only de evidencia.
+
+### Limitaciones conocidas
+
+El discovery ordena las entradas de cada directorio para obtener un manifiesto determinista. El consumo general permanece acotado por batch, queries y Top-K, pero un único directorio plano con una cantidad extrema de archivos requiere memoria proporcional a las entradas de ese directorio durante su ordenamiento.

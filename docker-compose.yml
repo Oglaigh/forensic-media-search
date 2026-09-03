@@ -8,6 +8,7 @@ services:
     volumes:
       - ./evidence:/evidence:ro
       - ./models:/root/.cache/clip
+      - ./models/huggingface:/root/.cache/huggingface
       - ./output:/output
 
     environment:

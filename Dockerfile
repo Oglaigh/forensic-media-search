@@ -22,8 +22,12 @@ RUN pip install --no-cache-dir \
     torchvision==0.27.1 \
     --index-url https://download.pytorch.org/whl/cu132
 
+COPY requirements.txt /app/requirements.txt
+
 RUN pip install --no-cache-dir \
-    git+https://github.com/openai/CLIP.git
+    -r /app/requirements.txt
+
+ENV HF_HOME=/root/.cache/huggingface
 
 COPY src /app/src
 

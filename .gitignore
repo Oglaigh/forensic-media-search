@@ -27,6 +27,7 @@ Thumbs.db
 .env.*
 
 # Models / ML artifacts
+models/
 *.pt
 *.pth
 *.onnx
