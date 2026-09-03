@@ -75,16 +75,24 @@ docker run --rm --gpus all `
   --output /output/report.csv
 ```
 
-También puede utilizarse el wrapper PowerShell:
+La forma recomendada es utilizar el programa interactivo de consola. Primero cree
+la configuración local (el archivo `.env` está ignorado por Git):
 
 ```powershell
-.\run.ps1 -Directory "D:\DiscoPeritado" `
-  -Query "Es un perro","Es un robot" `
-  -TopK 1000 `
-  -BatchSize 64
+Copy-Item .env.example .env
+python .\console.py
 ```
 
-Para un smoke test determinista sobre las primeras 100 imágenes agregue `--max-images 100`. La consola lo identifica como un scan parcial.
+El programa solicita y valida primero el directorio de evidencia. Después permite
+ingresar una query por vez; escriba `:q` para finalizar la carga. Antes de iniciar
+Docker muestra el resumen y solicita confirmación. Luego presenta una barra de progreso
+por modelo basada en los archivos realmente examinados. La evidencia se monta siempre
+como `readonly`, y no se crean directorios de salida ni caché si se cancela.
+
+Todos los demás parámetros se configuran en `.env`: imagen Docker, salida, cachés,
+Top-K, batch size, modelos, dispositivo, constante RRF, límite opcional de imágenes
+y prefijo del reporte. Para un smoke test determinista establezca, por ejemplo,
+`MAX_IMAGES=100`; déjelo vacío para procesar toda la colección.
 
 ## Cachés
 

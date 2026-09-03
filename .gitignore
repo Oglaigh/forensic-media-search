@@ -25,6 +25,7 @@ Thumbs.db
 # Environment variables
 .env
 .env.*
+!.env.example
 
 # Models / ML artifacts
 models/

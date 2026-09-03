@@ -101,6 +101,7 @@ def run_model_pass(
     metrics: ScanMetrics,
     journal: ErrorJournal,
     progress: Callable[[str], None],
+    total_images: int,
 ) -> tuple[dict[str, tuple], float]:
     """Load one model, scan the fixed manifest, and retain per-query Top-K."""
 
@@ -113,11 +114,12 @@ def run_model_pass(
         ranking = PerQueryTopK(model_id, queries, k=top_k)
         _cuda_sync(model.info.device)
         metrics.begin_pass(model_id)
-        processed_since_progress = 0
+        examined = 0
         try:
             for decoded_batch in iter_decoded_batches(
                 read_manifest(manifest_path), batch_size=batch_size
             ):
+                examined += len(decoded_batch.images) + len(decoded_batch.errors)
                 for error in decoded_batch.errors:
                     metrics.record_decode_error(model_id, error.entry.ordinal)
                     journal.record(phase="decode", model_id=model_id, error=error)
@@ -145,16 +147,11 @@ def run_model_pass(
                     ranking.update_batch(file_ids, similarities)
                     for file_id in file_ids:
                         metrics.record_processed(model_id, file_id)
-                    processed_since_progress += len(file_ids)
-                    if processed_since_progress >= 1000:
-                        progress(
-                            f"{model_id}: processed "
-                            f"{len(metrics.passes[model_id].processed)} images"
-                        )
-                        processed_since_progress = 0
+                    progress(f"@@PROGRESS\t{model_id}\t{examined}\t{total_images}")
                 finally:
                     for item in decoded_batch.images:
                         item.image.close()
+            progress(f"@@PROGRESS\t{model_id}\t{total_images}\t{total_images}")
         finally:
             _cuda_sync(model.info.device)
             metrics.finish_pass(model_id)
@@ -365,6 +362,10 @@ def run_search(
             images_discovered=discovery.images_discovered,
             filesystem_errors=discovery.filesystem_errors,
         )
+        progress(
+            f"@@PROGRESS\tdiscovery\t{discovery.images_discovered}\t"
+            f"{discovery.images_discovered}"
+        )
         for model in models:
             progress(f"PASS: {model.model_id}")
             ranked, prep_seconds = run_model_pass(
@@ -376,7 +377,9 @@ def run_search(
                 metrics=metrics,
                 journal=journal,
                 progress=progress,
+                total_images=discovery.images_discovered,
             )
+            progress(f"@@MODEL_COMPLETE\t{model.model_id}")
             rankings[model.model_id] = ranked
             preparation[model.model_id] = prep_seconds
             model_metadata[model.model_id] = {
