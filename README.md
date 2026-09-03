@@ -1,230 +1,57 @@
-# Forensic Media Search
+# Corrected Codex Agents + Skills pack
 
-Aplicación offline de consola para triage semántico de colecciones de imágenes. Recorre un directorio de evidencia de forma recursiva y devuelve candidatos para revisión humana; ningún resultado prueba que un objeto o atributo exista.
+This version matches the current Codex custom-agent and skill schemas.
 
-## Arquitectura
+## Important fixes
 
-La búsqueda utiliza dos motores independientes:
+Custom agent TOML files use the required:
 
-1. SigLIP 2 `google/siglip2-base-patch16-224` como motor principal.
-2. OpenAI CLIP `ViT-B/32` como motor secundario.
+```toml
+name = "..."
+description = "..."
+developer_instructions = "..."
+```
 
-Los motores se ejecutan secuencialmente para reducir presión sobre la VRAM. Cada uno procesa el mismo manifiesto estable de archivos, pero utiliza su propio preprocessing y su propia escala de similitud.
+Skills begin with required YAML frontmatter:
 
-`--top-k K` conserva K candidatos **por modelo y por query**. Con dos queries se mantienen cuatro listas independientes:
+```yaml
+---
+name: skill-name
+description: When the skill should be used.
+---
+```
+
+## Layout
 
 ```text
-SigLIP2 / query 1 -> Top K
-SigLIP2 / query 2 -> Top K
-CLIP    / query 1 -> Top K
-CLIP    / query 2 -> Top K
+AGENTS.md
+
+.codex/
+└── agents/
+    ├── forensic-architect.toml
+    ├── indexing-engineer.toml
+    ├── vision-model-specialist.toml
+    └── forensic-reviewer.toml
+
+.agents/
+└── skills/
+    ├── evidence-indexing/SKILL.md
+    ├── exact-vector-search/SKILL.md
+    ├── embedding-equivalence/SKILL.md
+    └── forensic-validation/SKILL.md
+
+PROMPT_ARCHITECTURE_REDESIGN.md
+PROMPT_IMPLEMENT_INDEX_SEARCH.md
 ```
 
-No se aplica un `argmax` global entre queries. Una imagen puede aparecer para varias queries. Luego se unifican únicamente resultados con la misma clave `archivo + query`.
+## Recommended use
 
-El orden final usa Reciprocal Rank Fusion:
+1. Finish and commit current Evaluator work.
+2. Copy this pack into the repository root, replacing the malformed versions from the previous bundle.
+3. Restart Codex CLI.
+4. Run Phase 1 first with `PROMPT_ARCHITECTURE_REDESIGN.md`.
+5. Inspect subagents using `/agent`.
+6. Review the architecture before implementation.
+7. Run Phase 2 using `PROMPT_IMPLEMENT_INDEX_SEARCH.md`.
 
-```text
-FusionScore = 1 / (60 + SigLIP2Rank) + 1 / (60 + CLIPRank)
-```
-
-Un motor que no recuperó esa combinación no aporta un término. Los scores de SigLIP2 y CLIP nunca se comparan ni combinan directamente.
-
-## Requisitos
-
-- Windows 10/11 con WSL2 y Docker Desktop.
-- GPU NVIDIA y drivers compatibles con CUDA.
-- Desarrollo validado para NVIDIA GeForce RTX 4080 de 16 GB.
-- Al menos 16 GB de RAM; 32 GB recomendados.
-- Espacio para la imagen Docker y los cachés de ambos modelos.
-
-La CLI exige CUDA por defecto. Para un diagnóstico deliberado sin GPU puede indicarse `--device cpu`; nunca hay fallback silencioso.
-
-Verificación básica:
-
-```powershell
-nvidia-smi
-docker run --rm --gpus all ubuntu nvidia-smi
-```
-
-## Build
-
-Desde la raíz del repositorio:
-
-```powershell
-docker build -t forensic-media-search:dev .
-```
-
-Las revisiones de Transformers, SigLIP2 y OpenAI CLIP están fijadas para mejorar la reproducibilidad.
-
-## Ejecución
-
-La experiencia principal es el programa interactivo de consola. Primero cree la
-configuración local (el archivo `.env` está ignorado por Git):
-
-```powershell
-Copy-Item .env.example .env
-python .\console.py
-```
-
-El asistente solicita evidencia y queries, y después ofrece la consolidación final:
-
-```text
-03  EVALUACIÓN FINAL
-
-¿Desea generar un informe final consolidado? [S/n] ›
-Top-K por query para evaluación [300] ›
-Constante RRF del Evaluator [60] ›
-Ruta del informe final [report_..._final.csv] ›
-```
-
-La ruta puede ser un nombre relativo o una ruta absoluta, pero siempre debe estar
-dentro de `OUTPUT_DIRECTORY`. Antes de iniciar Docker se muestran el audit report,
-los parámetros del Evaluator y el final report. Responder `n` omite únicamente la
-consolidación: el audit report completo se genera siempre.
-
-Top-K, batch size, modelos y rutas base se configuran en `.env`. Los defaults
-interactivos `EVALUATOR_TOP_K=300` y `EVALUATOR_RRF_CONSTANT=60` son opcionales;
-los `.env` existentes continúan siendo válidos. Para un smoke test determinista
-establezca `MAX_IMAGES=100`; déjelo vacío para procesar toda la colección.
-
-La invocación directa del contenedor se conserva como alternativa avanzada y como
-interfaz interna del launcher:
-
-```powershell
-docker run --rm --gpus all `
-  --mount type=bind,source="D:\DiscoPeritado",target=/evidence,readonly `
-  --mount type=bind,source="$PWD\output",target=/output `
-  --mount type=bind,source="$PWD\models",target=/root/.cache/clip `
-  --mount type=bind,source="$PWD\models\huggingface",target=/root/.cache/huggingface `
-  forensic-media-search:dev `
-  --directory /evidence `
-  --display-root "D:\DiscoPeritado" `
-  --query "Es un perro" `
-  --query "Es un robot" `
-  --top-k 1000 `
-  --batch-size 64 `
-  --output /output/audit.csv `
-  --evaluator-top-k 300 `
-  --evaluator-rrf-constant 60 `
-  --final-output /output/final.csv
-```
-
-La evidencia se monta siempre como `readonly`. No se crean directorios de salida ni
-caché si el usuario cancela antes de iniciar la búsqueda.
-
-## Cachés
-
-- OpenAI CLIP: `models/` montado en `/root/.cache/clip`.
-- Hugging Face/SigLIP2: `models/huggingface/` montado en `/root/.cache/huggingface`.
-
-Los cachés persisten fuera del contenedor. Una segunda ejecución puede verificarse sin red, una vez descargados ambos modelos, agregando `--network none` y las variables `-e HF_HUB_OFFLINE=1 -e TRANSFORMERS_OFFLINE=1` al comando Docker.
-
-## Informes
-
-El **audit report** contiene una fila por `archivo + query` y conserva toda la
-trazabilidad. `FinalRank` comienza en 1 de forma independiente dentro de cada query:
-
-```csv
-FilePath,OriginalQuery,MatchedQuery,SigLIP2Score,CLIPCos,SigLIP2Rank,CLIPRank,ModelsMatched,FinalRank,FusionScore
-D:\Evidence\IMG001.jpg,Es un perro,Es un perro,0.312345,0.287654,12,19,SigLIP2+CLIP,1,0.027149321267
-D:\Evidence\IMG001.jpg,Es un robot,Es un robot,0.221234,,820,,SigLIP2,145,0.001136363636
-```
-
-`ModelsMatched` vale `SigLIP2`, `CLIP` o `SigLIP2+CLIP`. Si un motor no incluyó la combinación dentro de su Top-K, sus campos de score y rank quedan vacíos; nunca se inventa un cero.
-
-`SigLIP2Score` y `CLIPCos` son similitudes coseno propias de cada modelo. `FusionScore` es una medida de fusión de rankings. Ninguno representa probabilidad, confianza estadística ni porcentaje de certeza.
-
-Si se habilita la evaluación final, se aplica un corte independiente sobre el
-`FinalRank` de cada query. La inclusión es OR: basta con que el archivo esté dentro
-de `EVALUATOR_TOP_K` para una query. Después se consolida una fila por archivo:
-
-```text
-EvaluatorScore = suma de 1 / (EvaluatorRRFConstant + FinalRank)
-```
-
-Sólo aportan las queries dentro del corte. El orden del final report es:
-
-1. `StrongQueryCount` descendente.
-2. `EvaluatorScore` descendente.
-3. `BestQueryRank` ascendente.
-4. Ordinal estable del manifiesto ascendente.
-
-Así, el consenso entre queries tiene prioridad sobre una coincidencia individual
-excelente. `QueryMatches` contiene JSON compacto con todas las queries fuertes, sus
-ranks y contribuciones. El Evaluator usa exclusivamente ranks; nunca compara scores
-de SigLIP2, CLIP o RRF entre queries. `EvaluatorScore` tampoco es una probabilidad.
-El cutoff, la constante y el audit report de origen también quedan registrados para
-reproducir y auditar la consolidación.
-
-Junto al CSV se conservan:
-
-- `report.csv.manifest.jsonl`: universo estable de archivos descubierto.
-- `report.csv.errors.jsonl`: errores de filesystem y decoding por motor.
-
-## Diagnóstico SigLIP2 con ranking completo
-
-`--all-results` procesa todo el manifiesto únicamente con SigLIP2. No carga CLIP, no aplica Top-K, no ejecuta RRF y no descarta imágenes procesables. Cada query recibe su propio ranking completo 1-based.
-
-```powershell
-docker run --rm --gpus all `
-  --mount type=bind,source="D:\DiscoPeritado",target=/evidence,readonly `
-  --mount type=bind,source="$PWD\output",target=/output `
-  --mount type=bind,source="$PWD\models\huggingface",target=/root/.cache/huggingface `
-  forensic-media-search:dev `
-  --directory /evidence `
-  --display-root "D:\DiscoPeritado" `
-  --query "una fotografía de un perro" `
-  --all-results `
-  --batch-size 64 `
-  --output /output/siglip2-all-results.csv
-```
-
-El CSV diagnóstico contiene:
-
-```text
-FilePath,Query,SigLIP2Score,Rank,Model,Revision
-```
-
-`--all-results` es incompatible con `--top-k`, `--clip-model`/`--model`, `--rrf-constant` y `--max-images`.
-
-### Semántica de SigLIP2Score
-
-El adapter obtiene `get_image_features()` y `get_text_features()`, convierte los embeddings a FP32, los normaliza L2 y calcula:
-
-```text
-SigLIP2Score = cosine(normalized_image_embedding, normalized_text_embedding)
-```
-
-El `forward()` oficial del checkpoint calcula sus logits como:
-
-```text
-logit = cosine * exp(logit_scale) + logit_bias
-```
-
-El checkpoint fijado posee `logit_scale` y `logit_bias` aprendidos. Como ambos son escalares globales y `exp(logit_scale)` es positivo, transformar cosenos a logits no cambia el orden de las imágenes dentro de una query. El coseno omite la calibración afín usada por el modelo antes de sigmoid, pero no pierde información de ranking. Por eso el modo diagnóstico conserva el score coseno existente y no lo presenta como probabilidad.
-
-## Seguridad forense
-
-- La evidencia se monta `readonly` y sólo se abre en modo lectura.
-- No se modifican imágenes ni metadatos.
-- No se escriben thumbnails ni temporales dentro de evidencia.
-- Archivos corruptos se registran y el scan continúa.
-- CSV, manifiesto, errores y cachés se escriben fuera de evidencia.
-- La CLI rechaza `HF_HOME` o `CLIP_CACHE_DIR` si resuelven dentro de evidencia.
-- `FilePath` conserva la ruta original mediante `--display-root` cuando se proporciona.
-
-## Tests
-
-Los unit tests usan adapters falsos y no descargan modelos:
-
-```powershell
-python -m pytest -q
-docker compose config
-```
-
-Los tests cubren Top-K independiente por query, unión y RRF por `archivo + query`, candidatos recuperados por uno o ambos motores, empates deterministas, corruptos, campos CSV vacíos y apertura read-only de evidencia.
-
-### Limitaciones conocidas
-
-El discovery ordena las entradas de cada directorio para obtener un manifiesto determinista. El consumo general permanece acotado por batch, queries y Top-K, pero un único directorio plano con una cantidad extrema de archivos requiere memoria proporcional a las entradas de ese directorio durante su ordenamiento.
+The specialist agents in this pack are deliberately read-only. The main Codex thread owns integration and file edits.

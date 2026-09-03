@@ -1,295 +1,136 @@
-# Forensic Media Search
+# forensic-media-search
 
-## Project purpose
+## Purpose
 
-Build an offline forensic media search system that scans a directory or mounted
-disk recursively, evaluates image files against written visual specifications,
-and produces a report containing candidate matches.
+`forensic-media-search` is an offline forensic-media triage system for ranking candidate images for human review.
 
-The primary use case is:
+Model scores, ranks, fusion scores, and evaluation ranks are not probabilities and are not evidentiary conclusions.
 
-1. Receive a directory or disk.
-2. Receive one or more written visual specifications.
-3. Convert those specifications into one or more model queries.
-4. Iterate all supported image files recursively.
-5. Evaluate every image using the configured vision-language model.
-6. Keep candidate matches according to configured scoring rules.
-7. Generate a report.
+## Critical invariants
 
-Minimum report contract:
+- Evidence is strictly read-only.
+- Generated artifacts must be outside the evidence directory.
+- Never modify evidence files, names, contents, metadata, or timestamps.
+- Prefer recall over precision.
+- Preserve deterministic ordering whenever practical.
+- Never silently fall back from CUDA to CPU when CUDA is required.
+- Model names, revisions, preprocessing, and weight hashes must remain traceable.
+- Do not compare raw model scores across incompatible models.
+- Similarity scores are not probabilities.
 
-FilePath | % | Cos
+## Current pipeline
 
-Additional columns may be added when they improve traceability.
+```text
+DISCOVERY
+    ↓
+DIRECT MODEL INFERENCE
+    ↓
+TOP-K PER MODEL + QUERY
+    ↓
+RRF PER FILE + QUERY
+    ↓
+AUDIT REPORT
+    ↓
+QUERY EVALUATOR
+    ↓
+FINAL REPORT
+```
 
----
+The audit report intentionally has one row per `file + query`.
 
-## Current architecture
+The final report intentionally has one row per file.
 
-The current baseline stack is:
+For multiple queries:
 
-- Windows host
-- Docker Desktop
-- Linux containers through WSL2
-- NVIDIA CUDA
-- NVIDIA GeForce RTX 4080 16 GB
-- Python 3.11
-- PyTorch
-- OpenAI CLIP
-- ViT-B/32 baseline model
+- inclusion is OR-based;
+- matching multiple queries increases priority;
+- failing one query must not eliminate a strong hit on another query.
 
-The model execution must use CUDA when available.
+## Target architecture
 
-Do not silently fall back to CPU when the workflow explicitly expects GPU
-execution. Report the selected device at startup.
+```text
+EVIDENCE
+   ↓
+INDEX ONCE
+   ↓
+PERSISTENT IMAGE EMBEDDINGS
+   ↓
+SEARCH MANY TIMES
+   ↓
+TOP-K PER MODEL + QUERY
+   ↓
+RRF PER FILE + QUERY
+   ↓
+AUDIT REPORT
+   ↓
+QUERY EVALUATOR
+   ↓
+FINAL REPORT
+```
 
----
+SEARCH must not decode evidence images or run image encoders.
 
-## Forensic invariants
+The first indexed-search implementation must be exact.
 
-Evidence is immutable.
+Do not introduce ANN, HNSW, IVF, PQ, quantization, lower-resolution inference, smaller models, thumbnails, or sampling unless explicitly requested.
 
-Never:
+## Direct vs indexed equivalence
 
-- modify an evidence file;
-- rename an evidence file;
-- delete an evidence file;
-- rewrite EXIF metadata;
-- create thumbnails inside the evidence directory;
-- write temporary files into the evidence directory.
+Keep DIRECT mode for validation.
 
-Evidence volumes must be mounted read-only whenever possible.
+For identical evidence, manifest, models, revisions, preprocessing, queries, Top-K, RRF and Evaluator configuration:
 
-Example:
+- Top-K membership must match;
+- model ranks must match;
+- RRF ordering must match;
+- FinalRank must match;
+- final Evaluator ordering must match.
 
-    ./evidence:/evidence:ro
+Any floating-point score difference must be measured and explained.
 
-All generated artifacts must be written outside the evidence tree, normally
-under:
+## Delegation
 
-    /output
+Use custom agents for focused read-heavy analysis.
 
-Preserve the original file path in all reports.
+- `forensic_architect`: architecture, index layout, metadata, lifecycle, resume, forensic invariants.
+- `vision_model_specialist`: SigLIP2/CLIP feature semantics and DIRECT-vs-INDEXED numerical equivalence.
+- `indexing_engineer`: memmap/mmap, chunked exact search, resume, bounded memory and throughput.
+- `forensic_reviewer`: final read-only forensic/correctness review.
 
-An unreadable or corrupt image must not stop the complete scan. Record the
-error and continue processing.
+The primary agent owns implementation and integration.
 
----
+Do not have multiple agents modify overlapping files concurrently.
 
-## Search behavior
+Preferred workflow:
 
-The system is a forensic candidate-search engine, not a definitive classifier.
+1. delegate analysis to specialists;
+2. wait for all specialist results;
+3. primary agent proposes one architecture;
+4. primary agent implements;
+5. specialists validate;
+6. forensic reviewer performs final read-only review.
 
-A model score means that an image is a candidate for human review.
+## Skills
 
-Do not state that a model result proves that an object or attribute exists.
+Use these reusable procedures when applicable:
 
-Written specifications may produce multiple independent queries.
+- `evidence-indexing`
+- `exact-vector-search`
+- `embedding-equivalence`
+- `forensic-validation`
 
-Example:
+## Scope
 
-    Houses with red roofs or black doors
+For the indexed-search architecture iteration, stay within:
 
-may become:
+```text
+PERSISTENT IMAGE EMBEDDINGS
++
+EXACT INDEXED SEARCH
++
+RESUMABLE INDEX BUILD
++
+DIRECT/INDEXED EQUIVALENCE VALIDATION
+```
 
-    a house with a red roof
-    a house with a black door
-
-For OR semantics, the best matching query may determine the candidate score.
-
-Keep the original specification and the generated queries traceable.
-
----
-
-## Scores
-
-Cosine similarity is the primary raw model score.
-
-Do not describe cosine similarity as a probability.
-
-Do not convert:
-
-    cosine * 100
-
-and call it confidence.
-
-If a percentage is exposed before statistical calibration, it must be clearly
-identified as a relative/ranking score and its formula must be documented.
-
-A future calibrated percentage may be introduced only after validation against
-a labeled dataset.
-
----
-
-## Image discovery
-
-Scan recursively.
-
-Initial supported formats:
-
-- .jpg
-- .jpeg
-- .png
-- .bmp
-- .webp
-- .tif
-- .tiff
-
-Format detection should eventually rely on actual decodability in addition to
-file extension.
-
-Do not assume every file with a valid extension is a valid image.
-
----
-
-## GPU processing
-
-Do not process large collections one image at a time when batching is possible.
-
-The scanning implementation should support configurable batch sizes.
-
-Default development target:
-
-    batch_size = 64
-
-Batch size must remain configurable because memory consumption depends on the
-model.
-
-Use inference-only execution:
-
-    model.eval()
-
-and:
-
-    torch.inference_mode()
-
-or equivalent.
-
----
-
-## Performance architecture
-
-Separate these concepts:
-
-    media discovery
-    image decoding
-    embedding generation
-    query embedding
-    similarity calculation
-    candidate filtering
-    report generation
-
-Avoid coupling filesystem traversal directly to CLIP internals.
-
-The query embedding must be generated once per query set, not once per image.
-
----
-
-## Model architecture
-
-OpenAI CLIP ViT-B/32 is the initial baseline, not a permanent architectural
-dependency.
-
-Model loading must remain replaceable so future implementations can evaluate:
-
-- ViT-B/16
-- ViT-L/14
-- OpenCLIP
-- SigLIP
-- other compatible vision-language embedding models
-
-Do not spread CLIP-specific calls throughout the filesystem scanning code.
-
-Use an abstraction around the embedding model.
-
----
-
-## Output
-
-Primary CSV report must contain at least:
-
-    FilePath
-    Percent
-    Cos
-
-Prefer also retaining internally:
-
-    MatchedQuery
-    Model
-    ModelVersion
-    ScanTimestamp
-
-Future forensic manifests may additionally contain SHA256.
-
-The report must be sorted from strongest candidate to weakest candidate unless
-the user requests another ordering.
-
----
-
-## Code quality
-
-Prefer small modules with explicit responsibilities.
-
-Suggested structure:
-
-    src/
-      scanner/
-      models/
-      queries/
-      reporting/
-      cli/
-
-Do not introduce databases, FAISS, APIs, web interfaces, video analysis, OCR,
-or object detection unless the task explicitly requires them.
-
-We are currently building the simplest reliable end-to-end image scanning
-pipeline.
-
----
-
-## Docker
-
-Keep evidence mounts read-only.
-
-Do not bake evidence or generated reports into Docker images.
-
-The source tree may be bind-mounted read-only during development.
-
-Models may use a persistent cache volume.
-
----
-
-## Validation
-
-After relevant changes:
-
-1. Verify Python imports.
-2. Verify Docker build when Docker-related files changed.
-3. Verify CUDA is available for GPU workflows.
-4. Run the smallest applicable scan test.
-5. Confirm evidence files were not modified.
-6. Confirm the report is generated outside the evidence directory.
-
----
-
-## Agent delegation
-
-Use specialized subagents when a task materially benefits from separation of
-concerns.
-
-Preferred roles:
-
-- forensic_architect: architecture and forensic invariants
-- scan_engineer: scanner, batching, filesystem and implementation
-- clip_specialist: model queries, embeddings and scoring
-- forensic_reviewer: final read-only review
-
-For small changes, do not delegate unnecessarily.
-
-For architecture or large changes, prefer:
-
-    forensic_architect
-            ↓
-    scan_engineer / clip_specialist
-            ↓
-    forensic_reviewer
+Do not add unrelated databases, APIs, Kafka, Redis, UI, OCR, video processing, cloud inference or microservices.
