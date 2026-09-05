@@ -55,3 +55,26 @@ PROMPT_IMPLEMENT_INDEX_SEARCH.md
 7. Run Phase 2 using `PROMPT_IMPLEMENT_INDEX_SEARCH.md`.
 
 The specialist agents in this pack are deliberately read-only. The main Codex thread owns integration and file edits.
+
+## Persistent exact index
+
+The runtime now exposes three compatible workflows:
+
+```text
+# Build a new immutable index outside evidence.
+python -m forensic_media_search index --directory EVIDENCE --index CASE.index
+
+# Resume only an incomplete BUILDING index.
+python -m forensic_media_search index --directory EVIDENCE --index CASE.index --resume
+
+# Search every valid embedding exactly, without opening evidence images.
+python -m forensic_media_search search --index CASE.index --query "description" --output report.csv
+
+# Recalculate complete index hashes and validate normalized rows.
+python -m forensic_media_search verify --index CASE.index --full
+```
+
+The legacy command line remains the DIRECT validation mode. Indexed SEARCH uses
+memory-mapped float32 `.npy` matrices, preserves `row == manifest ordinal`, and
+reuses the existing per-model/query Top-K, RRF, audit and Evaluator semantics.
+Scores and ranks remain ranking measures, not probabilities or evidentiary conclusions.

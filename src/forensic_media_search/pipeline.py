@@ -68,6 +68,8 @@ class SearchResult:
     model_metadata: dict[str, dict[str, str | None]]
     evaluated_candidates: list[EvaluatedCandidate]
     final_output_path: Path | None
+    execution_counters: dict[str, int] | None = None
+    timings: dict[str, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)

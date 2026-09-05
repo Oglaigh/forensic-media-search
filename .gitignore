@@ -45,3 +45,8 @@ reports/
 .cache/
 tmp/
 temp/
+
+.codex*/
+.agents*/
+.manual-immutable*/
+AGENTS.md

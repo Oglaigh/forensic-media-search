@@ -1,9 +1,28 @@
+import importlib
 from pathlib import Path
 
 import pytest
 
 import forensic_media_search.cli as cli_module
 from forensic_media_search.cli import build_parser, validate_args
+
+
+def test_model_revisions_are_loaded_from_dotenv(tmp_path: Path, monkeypatch) -> None:
+    with monkeypatch.context() as patch:
+        patch.chdir(tmp_path)
+        patch.delenv("SIGLIP2_REVISION", raising=False)
+        patch.delenv("OPENAI_CLIP_REVISION", raising=False)
+        (tmp_path / ".env").write_text(
+            "SIGLIP2_REVISION=siglip-revision\n"
+            "OPENAI_CLIP_REVISION=clip-revision\n",
+            encoding="ascii",
+        )
+
+        reloaded_module = importlib.reload(cli_module)
+        assert reloaded_module.SIGLIP2_REVISION == "siglip-revision"
+        assert reloaded_module.OPENAI_CLIP_REVISION == "clip-revision"
+
+    importlib.reload(cli_module)
 
 
 def test_cli_top_k_means_per_model_and_query(tmp_path: Path) -> None:

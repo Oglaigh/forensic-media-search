@@ -14,7 +14,9 @@ def _env(tmp_path: Path) -> dict[str, str]:
         "HF_CACHE_DIRECTORY": str(tmp_path / "hf"),
         "TOP_K": "5000", "BATCH_SIZE": "64",
         "SIGLIP_MODEL": "google/siglip2-base-patch16-224",
+        "SIGLIP2_REVISION": "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
         "CLIP_MODEL": "ViT-B/32", "DEVICE": "cuda",
+        "OPENAI_CLIP_REVISION": "d05afc436d78f1c48dc0dbf8e5980a9d471f35f6",
         "RRF_CONSTANT": "60", "MAX_IMAGES": "", "REPORT_PREFIX": "report",
     }
 
@@ -37,6 +39,8 @@ def test_docker_command_mounts_evidence_read_only_and_appends_queries(tmp_path: 
         config, tmp_path.resolve(), ["perro", "robot"], "report.csv"
     )
     assert f"type=bind,source={tmp_path.resolve()},target=/evidence,readonly" in command
+    assert "SIGLIP2_REVISION=75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2" in command
+    assert "OPENAI_CLIP_REVISION=d05afc436d78f1c48dc0dbf8e5980a9d471f35f6" in command
     assert command.count("--query") == 2
     assert command[-4:] == ["--query", "perro", "--query", "robot"]
 

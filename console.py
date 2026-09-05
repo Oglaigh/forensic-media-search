@@ -97,7 +97,9 @@ class LauncherConfig:
     top_k: int
     batch_size: int
     siglip_model: str
+    siglip2_revision: str
     clip_model: str
+    openai_clip_revision: str
     device: str
     rrf_constant: int
     max_images: int | None
@@ -121,7 +123,9 @@ class LauncherConfig:
             top_k=_integer(values, "TOP_K", minimum=1),
             batch_size=_integer(values, "BATCH_SIZE", minimum=1),
             siglip_model=_required(values, "SIGLIP_MODEL"),
+            siglip2_revision=_required(values, "SIGLIP2_REVISION"),
             clip_model=_required(values, "CLIP_MODEL"),
+            openai_clip_revision=_required(values, "OPENAI_CLIP_REVISION"),
             device=device,
             rrf_constant=_integer(values, "RRF_CONSTANT", minimum=0),
             max_images=_optional_positive_int(values, "MAX_IMAGES"),
@@ -210,7 +214,12 @@ def build_docker_command(
     report_name: str,
     evaluation: object | None = None,
 ) -> list[str]:
-    command = ["docker", "run", "--rm", "--env", "PYTHONUNBUFFERED=1"]
+    command = [
+        "docker", "run", "--rm",
+        "--env", "PYTHONUNBUFFERED=1",
+        "--env", f"SIGLIP2_REVISION={config.siglip2_revision}",
+        "--env", f"OPENAI_CLIP_REVISION={config.openai_clip_revision}",
+    ]
     if config.device == "cuda":
         command += ["--gpus", "all"]
     command += [
